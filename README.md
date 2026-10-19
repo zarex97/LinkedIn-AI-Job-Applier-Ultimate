@@ -268,6 +268,19 @@ This project enhances the original codebase with several powerful new features:
     - Set: `LLM_MODEL_TYPE = "claude"`
     - Examples: `claude-3-5-sonnet`, `claude-4-opus` (use any valid Claude model ID)
 
+    **Claude subscription (no API key)**
+
+    Runs the whole bot on your Claude Pro or Max plan through the Claude Code CLI. Outside-site applications use Claude Code itself as the agent. It drives the bot's own browser through the [browser-use CLI](https://github.com/browser-use/browser-use), never your personal Chrome.
+
+    1. Install [Claude Code](https://claude.com/claude-code) and run `claude` once to log in with your subscription.
+    2. Install the browser-use CLI apart from the project: `uv tool install browser-use --python 3.12`.
+    3. In `config/app_config.py` set `LLM_MODEL_TYPE = "claude_code"`, `EASY_APPLY_MODEL = "haiku"`, `APPLY_AGENT_MODEL = "sonnet"` and `EASY_APPLY_ONLY_MODE = False`.
+    4. Leave `llm_api_key` empty in `.env`, and make sure `ANTHROPIC_API_KEY` is not set. The bot removes it from every `claude` call anyway, because `claude -p` bills a present API key instead of your plan.
+    5. Set `external_sites_password` in `.env` to a strong password. The agent uses it when an outside job site asks you to create an account. Leave it empty to skip those sites.
+    6. Usage counts against your plan's limits, shared with the Claude app. When the five-hour limit is hit, the bot waits for the reset and carries on. When the weekly limit is hit, the run stops cleanly.
+
+    If a site asks for email verification, the bot pauses and asks you in its console. Confirm your email, then press Enter.
+
     **Ollama (local/server)**
     - Set: `LLM_MODEL_TYPE = "ollama"`
     - Examples: `llama3`, `qwen2.5` (any model available in your Ollama)

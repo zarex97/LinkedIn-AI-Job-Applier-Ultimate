@@ -157,6 +157,7 @@ Possible values:
     - "openai"
     - "gigachat"
     - "claude"
+    - "claude_code"  (your Claude Pro/Max subscription through the claude CLI, no API key)
     - "ollama"
     - "gemini"
     - "huggingface"
@@ -176,6 +177,8 @@ EASY_APPLY_MODEL = "google/gemini-3.1-flash-lite-preview"
 APPLY_AGENT_MODEL = "google/gemini-3.1-flash-lite-preview"
 # APPLY_AGENT_MODEL = "google/gemini-3-flash-preview"
 # APPLY_AGENT_MODEL = "gpt-5-mini"
+# EASY_APPLY_MODEL = "haiku"  # with claude_code
+# APPLY_AGENT_MODEL = "sonnet"  # with claude_code
 
 """
 Easy Apply model temperature

@@ -15,7 +15,7 @@
 - `RESTART_EVERY_DAY` — auto-restart every 24h (LinkedIn only)
 - `READY_MADE_RESUME_PATH` — path to a ready-made resume PDF; if empty, a new resume is generated per vacancy
 - `RESUME_STYLE` — style for generated resumes (`"FAANGPath"`, `"Cloyola Grey"`, `"Modern Blue"`, `"Modern Grey"`, `"Default"`, `"Clean Blue"`); `None` prompts interactively
-- `LLM_MODEL_TYPE` — provider: `"gemini"`, `"openai"`, `"openrouter"`, `"claude"`, `"ollama"`
+- `LLM_MODEL_TYPE` — provider: `"gemini"`, `"openai"`, `"openrouter"`, `"claude"`, `"claude_code"` (Claude subscription via the `claude` CLI, no API key), `"ollama"`
 - `EASY_APPLY_MODEL` — model name for Easy Apply
 - `APPLY_AGENT_MODEL` — model name for Non-Easy Apply agent (LinkedIn only)
 - `JOB_IS_INTERESTING_THRESH` — LLM interest score threshold (1-100)
