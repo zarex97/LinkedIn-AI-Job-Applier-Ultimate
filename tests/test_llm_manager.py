@@ -5,9 +5,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 from langchain_core.messages import AIMessage
 from langchain_core.prompt_values import StringPromptValue
+from langchain_core.prompts import ChatPromptTemplate
 
+import src.llm.prompts as prompts
+from config.constants import cost_per_token
+from src.llm.claude_cli import ClaudeResult
 from src.llm.llm_manager import (
     AIAdapter,
+    ClaudeCodeModel,
     ClaudeModel,
     GeminiModel,
     GPTAnswerer,
@@ -202,6 +207,69 @@ class TestClaudeModel:
 
         assert isinstance(response, AIMessage)
         assert response.content == "Test response"
+
+
+def _claude_result(text="hi", input_tokens=10, output_tokens=3):
+    return ClaudeResult(
+        text=text,
+        structured_output=None,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        model="claude-haiku-5-5",
+        num_turns=1,
+        session_id="session-1",
+    )
+
+
+class TestClaudeCodeModel:
+    """Tests for ClaudeCodeModel class (Claude subscription through the claude CLI)"""
+
+    @patch("src.llm.llm_manager.run_claude")
+    def test_claude_code_model_invoke(self, mock_run_claude):
+        """Prompt text and system prompt go to run_claude; the reply comes back as an AIMessage"""
+        mock_run_claude.return_value = _claude_result()
+        prompt = ChatPromptTemplate.from_template("Q: {q}").invoke({"q": "x"})
+
+        response = ClaudeCodeModel("haiku").invoke(prompt)
+
+        kwargs = mock_run_claude.call_args.kwargs
+        assert kwargs["system_prompt"] == prompts.custom_instructions
+        assert kwargs["model"] == "haiku"
+        assert "Q: x" in mock_run_claude.call_args.args[0]
+        assert isinstance(response, AIMessage)
+        assert response.content == "hi"
+        assert response.usage_metadata == {"input_tokens": 10, "output_tokens": 3, "total_tokens": 13}
+        assert response.response_metadata["model_name"] == "claude-haiku-5-5"
+
+    @patch("src.llm.llm_manager.LLM_MODEL_TYPE", "claude_code")
+    @patch("src.llm.llm_manager.EASY_APPLY_MODEL", "haiku")
+    @patch("src.llm.llm_manager.ensure_claude_available")
+    def test_ai_adapter_claude_code_needs_no_key(self, mock_ensure):
+        """claude_code builds without an API key and checks the CLI is installed"""
+        adapter = AIAdapter(api_key=None)
+
+        assert isinstance(adapter.model, ClaudeCodeModel)
+        mock_ensure.assert_called_once()
+
+    @patch("src.llm.llm_manager.run_claude")
+    def test_logger_chat_model_parses_claude_code_reply(self, mock_run_claude):
+        """LoggerChatModel reads token counts from a ClaudeCodeModel reply"""
+        mock_run_claude.return_value = _claude_result(input_tokens=120, output_tokens=30)
+        reply = ClaudeCodeModel("haiku").invoke(StringPromptValue(text="hello"))
+
+        parsed = LoggerChatModel(MagicMock()).parse_llmresult(reply)
+
+        assert parsed["usage_metadata"] == {
+            "input_tokens": 120,
+            "output_tokens": 30,
+            "total_tokens": 150,
+        }
+
+
+@pytest.mark.parametrize("model", ["haiku", "sonnet", "opus"])
+def test_price_dict_claude_aliases_are_free(model):
+    """Subscription use costs nothing per token"""
+    assert cost_per_token(model, 1000, 1000) == (0.0, 0.0)
 
 
 class TestOllamaModel:

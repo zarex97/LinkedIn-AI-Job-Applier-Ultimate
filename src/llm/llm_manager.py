@@ -32,6 +32,7 @@ from config.app_config import (
 from config.constants import LOG_DIR, RESUME_DIR, cost_per_token
 from config.logger_config import logger
 from src.dashboard.runtime import emit_event
+from src.llm.claude_cli import ensure_claude_available, run_claude
 from src.pydantic_models.log_models import LLMCall
 from src.pydantic_models.prompt_models import LinkedInMessageClassification, ResumeStructure
 from src.utils.json_to_readable import transform_search_config_data, transform_vacancy_data
@@ -130,6 +131,30 @@ class ClaudeModel(AIModel):
         response = self.model.invoke(prompt)
         logger.debug("Successfully got access to model via Claude API")
         return response
+
+
+class ClaudeCodeModel(AIModel):
+    """Get access to Claude through the user's Claude subscription via the claude CLI"""
+
+    def __init__(self, llm_model: str) -> None:
+        self.model_name = llm_model
+
+    def invoke(self, prompt: ChatPromptTemplate) -> AIMessage:
+        prompt_text = "\n\n".join(str(message.content) for message in prompt.to_messages())
+        result = run_claude(
+            prompt_text, model=self.model_name, system_prompt=prompts.custom_instructions
+        )
+        logger.debug("Successfully got access to model via Claude Code CLI")
+        return AIMessage(
+            content=result.text,
+            id=result.session_id,
+            response_metadata={"model_name": result.model, "finish_reason": "stop"},
+            usage_metadata={
+                "input_tokens": result.input_tokens,
+                "output_tokens": result.output_tokens,
+                "total_tokens": result.input_tokens + result.output_tokens,
+            },
+        )
 
 
 class OllamaModel(AIModel):
@@ -344,6 +369,9 @@ class AIAdapter:
             if not api_key:
                 raise ValueError("API key is required for Claude model")
             return ClaudeModel(api_key, self.easy_apply_model)
+        elif self.model_type == "claude_code":
+            ensure_claude_available()
+            return ClaudeCodeModel(self.easy_apply_model)
         elif self.model_type == "ollama":
             return OllamaModel(self.easy_apply_model, llm_api_url)
         elif self.model_type == "openrouter":

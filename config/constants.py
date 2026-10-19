@@ -92,6 +92,11 @@ PRICE_DICT: dict[str, dict[str, float]] = {
         "input_cost_per_token": 3.00 / 1_000_000,
         "output_cost_per_token": 15.00 / 1_000_000,
     },
+    # Claude subscription through the claude CLI (LLM_MODEL_TYPE = "claude_code"):
+    # usage counts against plan limits, not per-token billing
+    "haiku": {"input_cost_per_token": 0.0, "output_cost_per_token": 0.0},
+    "sonnet": {"input_cost_per_token": 0.0, "output_cost_per_token": 0.0},
+    "opus": {"input_cost_per_token": 0.0, "output_cost_per_token": 0.0},
     # DeepSeek
     "deepseek/deepseek-chat-v3.1": {
         "input_cost_per_token": 0.15 / 1_000_000,
