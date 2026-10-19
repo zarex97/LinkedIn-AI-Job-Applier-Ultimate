@@ -747,3 +747,49 @@ Rewrite the LinkedIn reply below so it sounds more human and less AI-generated.
 {reply}
 ```
 """
+
+# Task for the agent that applies on outside company sites (Non-Easy Apply).
+# {tool_notes} explains the browser tools of the agent that runs the task.
+apply_agent_task_template = """
+- Your goal is to apply to the job at: {job_url}
+- Use the information from my resume (source of truth) and any additional information already present on the page.
+- If you cannot apply, finish the task (do not try different URLs).
+
+- Follow these instructions carefully:
+    - If anything pops up that blocks the form, close it and continue.
+    - Do not skip required fields. If an optional field is present, fill it if possible using my resume/context.
+    - Fill the form from top to bottom; do not skip a field to come back later.
+    - Some text boxes may have dropdown suggestions: after filling a textbox, check for a dropdown and select the correct option.
+
+- Resume:
+    - You may upload my resume PDF when the application asks for it.
+    - The resume file is available as: {resume_pdf_path}
+
+- {account_instruction}
+
+{tool_notes}
+
+- Before you start, create a step-by-step plan to complete the entire application. Delegate a step for each field/section you encounter.
+
+*** IMPORTANT ***
+    - You are not done until you have either submitted the application OR confirmed you cannot apply.
+    - At the end, structure your final result as:
+        1) a human-readable summary of all detections and actions performed
+        2) a list of all questions encountered on the page (including any screening questions)
+        3) a short final human-readable summary at the very end
+
+## My resume text (source of truth):
+{resume_readable}
+"""
+
+apply_agent_account_with_password = (
+    "If you are asked to register an account, use my email: {user_email} and password: {password}"
+)
+
+apply_agent_account_unavailable = (
+    "If the site requires creating an account, stop: you cannot apply."
+)
+
+# Tool notes for the browser_use library agent (API-key providers)
+apply_agent_browser_use_tool_notes = """- Uploading the resume: prefer the built-in upload_file_to_element action; if the page flow needs it, you can use the upload_resume tool to produce an UploadFileAction.
+- If an email verification or confirmation step appears, call the wait_for_email_verification tool immediately — do NOT give up or mark the task as failed. After the tool returns, continue the application."""

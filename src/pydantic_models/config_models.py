@@ -134,6 +134,7 @@ class Secrets(BaseModel):
     llm_api_key: Optional[str] = None
     llm_proxy: Optional[str] = None
     llm_api_url: Optional[str] = None
+    external_sites_password: Optional[str] = None
     tg_token: Optional[str] = None
     tg_api_id: Optional[str] = None
     tg_api_hash: Optional[str] = None

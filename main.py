@@ -318,7 +318,11 @@ async def create_and_run_bot(
         llm_api_url = secrets.get("llm_api_url")
         llm_answerer_component = GPTAnswerer(llm_api_key, llm_proxy, llm_api_url)
         llm_agent_component = ApplyAgent(
-            llm_api_key, BROWSER_STORAGE_STATE, llm_api_url, site_email
+            llm_api_key,
+            BROWSER_STORAGE_STATE,
+            llm_api_url,
+            site_email,
+            external_sites_password=secrets.get("external_sites_password"),
         )
 
         linkedin_email = site_email  # kept for LinkedInJobManager constructor compatibility

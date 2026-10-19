@@ -8,10 +8,35 @@ from browser_use.tools.views import UploadFileAction
 
 from config.app_config import APPLY_AGENT_MODEL, HEADLESS_MODE, LLM_MODEL_TYPE
 from config.constants import CUSTOM_COST_PER_TOKEN, LOG_DIR, RESUME_DIR, cost_per_token
+import src.llm.prompts as prompts
 from config.logger_config import logger
 from src.dashboard.runtime import emit_event
 from src.pydantic_models.log_models import LLMCall
 from src.utils.utils import append_yaml_file, get_ready_made_resume
+
+
+def build_apply_task(
+    job_url: str,
+    resume_readable: str,
+    resume_pdf_path: str,
+    user_email: str | None,
+    external_sites_password: str | None,
+    tool_notes: str,
+) -> str:
+    """Build the outside-site application task shared by every apply agent"""
+    if user_email and external_sites_password:
+        account_instruction = prompts.apply_agent_account_with_password.format(
+            user_email=user_email, password=external_sites_password
+        )
+    else:
+        account_instruction = prompts.apply_agent_account_unavailable
+    return prompts.apply_agent_task_template.format(
+        job_url=job_url,
+        resume_pdf_path=resume_pdf_path,
+        account_instruction=account_instruction,
+        tool_notes=tool_notes,
+        resume_readable=resume_readable,
+    )
 
 
 class ApplyAgent:
@@ -21,9 +46,11 @@ class ApplyAgent:
         browser_storage_state: str = None,
         llm_api_url: str = None,
         user_email: str = None,
+        external_sites_password: str = None,
     ) -> None:
         self.api_key = api_key
         self.user_email = user_email
+        self.external_sites_password = external_sites_password
         self.model = APPLY_AGENT_MODEL
         self.model_type = LLM_MODEL_TYPE
         self.llm_api_url = llm_api_url
@@ -48,6 +75,9 @@ class ApplyAgent:
     def select_model_type(self, model_type: str, llm_api_url: str) -> None:
         """Select the model to use."""
         self.model_type = model_type
+        if model_type == "claude_code":
+            # Claude Code itself is the agent; it drives the browser through the browser-use CLI
+            return None
         if model_type == "gemini":
             if not self.api_key:
                 raise ValueError("API key is required for Gemini model")
@@ -108,6 +138,12 @@ class ApplyAgent:
             raise ValueError(f"Unsupported model type: {model_type}")
         return llm
 
+    def loggable_task(self, task: str) -> str:
+        """Task text safe to write to logs: the outside-site password is masked"""
+        if self.external_sites_password:
+            return task.replace(self.external_sites_password, "********")
+        return task
+
     def set_resume(self, resume_readable: str) -> None:
         """Add resume for analysis."""
         self.resume_readable = resume_readable
@@ -146,38 +182,14 @@ class ApplyAgent:
             logger.info(f"Browser session saved to {browser_storage_state}")
             return "User confirmed email verification. Browser session saved. Proceeding with the application."
 
-        task = f"""
-        - Your goal is to apply to the job at: {job_url}
-        - Use the information from my resume (source of truth) and any additional information already present on the page.
-        - If you cannot apply, finish the task (do not try different URLs).
-
-        - Follow these instructions carefully:
-            - If anything pops up that blocks the form, close it and continue.
-            - Do not skip required fields. If an optional field is present, fill it if possible using my resume/context.
-            - Fill the form from top to bottom; do not skip a field to come back later.
-            - Some text boxes may have dropdown suggestions: after filling a textbox, check for a dropdown and select the correct option.
-
-        - Resume:
-            - You may upload my resume PDF when the application asks for it.
-            - The resume file is available as: {resume_pdf_path}
-            - Prefer using the built-in upload_file_to_element action; if the page flow needs it, you can use the upload_resume tool to produce an UploadFileAction.
-
-        - If you are asked to register an account, use my email: {self.user_email} and password: {self.user_email.split("@")[0] + "123456" if self.user_email else "unknown"}
-
-        - If an email verification or confirmation step appears, call the wait_for_email_verification tool immediately — do NOT give up or mark the task as failed. After the tool returns, continue the application.
-
-        - Before you start, create a step-by-step plan to complete the entire application. Delegate a step for each field/section you encounter.
-
-        *** IMPORTANT ***
-            - You are not done until you have either submitted the application OR confirmed you cannot apply.
-            - At the end, structure your final_result as:
-                1) a human-readable summary of all detections and actions performed
-                2) a list of all questions encountered on the page (including any screening questions)
-                3) a short final human-readable summary at the very end
-
-        ## My resume text (source of truth):
-        {self.resume_readable}
-        """
+        task = build_apply_task(
+            job_url=job_url,
+            resume_readable=self.resume_readable,
+            resume_pdf_path=resume_pdf_path,
+            user_email=self.user_email,
+            external_sites_password=self.external_sites_password,
+            tool_notes=prompts.apply_agent_browser_use_tool_notes,
+        )
 
         available_file_paths = [resume_pdf_path]
 
@@ -201,7 +213,7 @@ class ApplyAgent:
         finally:
             await browser.stop()
 
-        self._log_token_usage(task)
+        self._log_token_usage(self.loggable_task(task))
         emit_event("agent_apply_completed", "External apply agent completed", url=job_url)
 
     def _log_token_usage(self, task: str) -> None:
@@ -280,13 +292,16 @@ if __name__ == "__main__":
             secrets = dotenv.dotenv_values(".env")
             llm_api_key = secrets.get("llm_api_key", "")
 
-            if not llm_api_key:
+            if not llm_api_key and LLM_MODEL_TYPE != "claude_code":
                 logger.error("❌ LLM API key not found in .env file")
                 return False
 
             # Initialize ApplyAgent
             apply_agent = ApplyAgent(
-                llm_api_key, BROWSER_STORAGE_STATE, user_email=secrets.get("linkedin_email", "")
+                llm_api_key,
+                BROWSER_STORAGE_STATE,
+                user_email=secrets.get("linkedin_email", ""),
+                external_sites_password=secrets.get("external_sites_password"),
             )
             logger.info("ApplyAgent initialized successfully")
 
