@@ -32,7 +32,12 @@ from config.app_config import (
 from config.constants import LOG_DIR, RESUME_DIR, cost_per_token
 from config.logger_config import logger
 from src.dashboard.runtime import emit_event
-from src.llm.claude_cli import ensure_claude_available, run_claude
+from src.llm.claude_cli import (
+    CLAUDE_LIMIT_DEFAULT_WAIT_SECONDS,
+    ClaudeUsageLimitError,
+    ensure_claude_available,
+    run_claude,
+)
 from src.pydantic_models.log_models import LLMCall
 from src.pydantic_models.prompt_models import LinkedInMessageClassification, ResumeStructure
 from src.utils.json_to_readable import transform_search_config_data, transform_vacancy_data
@@ -563,6 +568,17 @@ class LoggerChatModel:
                     )
 
                 return reply
+
+            except ClaudeUsageLimitError as e:
+                # five-hour subscription limit: wait for the reset, then retry the same call
+                if e.resets_at is not None:
+                    wait_time = max((e.resets_at - datetime.now()).total_seconds(), 0) + 60
+                else:
+                    wait_time = CLAUDE_LIMIT_DEFAULT_WAIT_SECONDS
+                logger.warning(
+                    f"Claude usage limit reached ({e}). Waiting {wait_time:.0f} seconds before retry..."
+                )
+                pause(wait_time, wait_time + 1)
 
             except httpx.HTTPStatusError as e:
                 logger.error(f"HTTPStatusError occurred: {str(e)}")

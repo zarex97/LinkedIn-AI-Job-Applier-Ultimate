@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.job_manager.linkedin.job_manager_linkedin import LinkedInJobManager
+from src.llm.claude_cli import ClaudeWeeklyLimitError
 from src.pydantic_models.job_models import Job
 
 LINKEDIN_JOB_URL = "https://linkedin.com/jobs/view/123456"
@@ -970,3 +971,34 @@ class TestApplyJob:
             result = await manager.apply_job({"url": LINKEDIN_JOB_URL})
 
         assert result == "Limit"
+
+
+class TestClaudeWeeklyLimit:
+    @pytest.mark.asyncio
+    async def test_weekly_limit_propagates_through_job_manager(self, manager, mock_page, test_job):
+        """apply_job wraps its work in broad excepts; the weekly limit must reach the caller"""
+        TestApplyJob()._setup_manager(manager)
+        new_page = AsyncMock()
+        new_page.url = LINKEDIN_JOB_URL
+        mock_page.context.new_page = AsyncMock(return_value=new_page)
+        mock_llm = MagicMock()
+        mock_llm.job_is_interesting.side_effect = ClaudeWeeklyLimitError("weekly limit reached")
+        manager.llm_answerer_component = mock_llm
+
+        with (
+            patch.object(
+                manager,
+                "_get_detailed_job_description",
+                new_callable=AsyncMock,
+                return_value=test_job,
+            ),
+            patch(
+                "src.job_manager.linkedin.job_manager_linkedin.async_pause",
+                new_callable=AsyncMock,
+            ),
+            patch.object(manager, "_handle_apply_result", new_callable=AsyncMock),
+            patch("src.job_manager.linkedin.job_manager_linkedin.COLLECT_INFO_MODE", False),
+            patch("src.job_manager.linkedin.job_manager_linkedin.MONKEY_MODE", False),
+        ):
+            with pytest.raises(ClaudeWeeklyLimitError):
+                await manager.apply_job({"url": LINKEDIN_JOB_URL})

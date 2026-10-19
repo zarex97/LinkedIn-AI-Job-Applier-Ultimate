@@ -47,6 +47,7 @@ else:
 from src.job_manager.bot_facade import BotFacade
 from src.job_manager.resume_anonymizer import ResumeAnonymizer
 from src.llm.apply_agent import ApplyAgent
+from src.llm.claude_cli import ClaudeWeeklyLimitError
 from src.llm.llm_manager import GPTAnswerer
 from src.pydantic_models.config_models import SearchConfig, Secrets
 from src.pydantic_models.prompt_models import ResumeStructure
@@ -448,6 +449,15 @@ def main() -> None:
 
             asyncio.run(create_and_run_bot(search_config, secrets, resume_text, resume_structured))
             logger.info(f"{JOB_SITE.capitalize()} bot completed successfully")
+
+        except ClaudeWeeklyLimitError as weekly_limit:
+            reset_text = (
+                f" at {weekly_limit.resets_at:%Y-%m-%d %H:%M}" if weekly_limit.resets_at else ""
+            )
+            message = f"Claude weekly usage limit reached. Stopping until it resets{reset_text}."
+            logger.warning(message)
+            emit_event("run_stopped", message)
+            should_exit = True
 
         except StopRequested as stop_requested:
             logger.warning(str(stop_requested))

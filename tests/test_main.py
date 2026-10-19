@@ -1,6 +1,7 @@
 """Test suite for main.py"""
 
 import sys
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -11,6 +12,7 @@ sys.modules["browser_use.tools"] = MagicMock()
 sys.modules["browser_use.tools.views"] = MagicMock()
 
 from main import ConfigError, ConfigValidator, create_and_run_bot, main
+from src.llm.claude_cli import ClaudeWeeklyLimitError
 
 
 class TestConfigValidator:
@@ -1078,3 +1080,30 @@ class TestMain:
             # Verify completion messages
             mock_logger.info.assert_any_call("Linkedin bot completed successfully")
             mock_logger.info.assert_any_call("Program completed")
+
+
+class TestMainClaudeWeeklyLimit:
+    def test_main_stops_on_weekly_limit(self):
+        """The weekly limit ends the run cleanly instead of waiting for the next daily run"""
+        mock_validator = MagicMock()
+        mock_validator.validate_secrets.return_value = {}
+        mock_validator.validate_search_config.return_value = {}
+        mock_validator.validate_resume_text.return_value = "resume text"
+        mock_validator.validate_resume_structured.return_value = {}
+        weekly = ClaudeWeeklyLimitError("Weekly limit reached", resets_at=datetime(2026, 10, 21, 15, 0))
+
+        with (
+            patch("main.Path"),
+            patch("main.ConfigValidator", return_value=mock_validator),
+            patch("main.asyncio.run", side_effect=weekly) as mock_asyncio_run,
+            patch("main.RESTART_EVERY_DAY", True),
+            patch("main.logger") as mock_logger,
+        ):
+            main()
+
+        assert mock_asyncio_run.call_count == 1
+        logged = " ".join(str(call) for call in mock_logger.method_calls)
+        assert (
+            "Claude weekly usage limit reached. Stopping until it resets at 2026-10-21 15:00."
+            in logged
+        )

@@ -31,6 +31,9 @@ CLAUDE_ISOLATION_FLAGS = [
 ]
 CLAUDE_NO_TOOLS_FLAGS = ["--tools", ""]
 
+# Wait used when a usage-limit message carries no reset time we can read
+CLAUDE_LIMIT_DEFAULT_WAIT_SECONDS = 1800
+
 _STRIPPED_ENV_KEYS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 
 _EPOCH_RESET = re.compile(r"\|\s*(\d{9,})")
@@ -65,8 +68,14 @@ class ClaudeUsageLimitError(ClaudeCLIError):
         self.resets_at = resets_at
 
 
-class ClaudeWeeklyLimitError(ClaudeCLIError):
-    """The subscription's weekly usage limit was reached."""
+class ClaudeWeeklyLimitError(BaseException):
+    """
+    The subscription's weekly usage limit was reached.
+
+    Derives from BaseException on purpose, like KeyboardInterrupt: the bot wraps
+    LLM calls and job steps in many `except Exception` blocks, and this error must
+    pass through all of them to end the run in main().
+    """
 
     def __init__(self, message: str, resets_at: datetime | None = None):
         super().__init__(message)
@@ -132,7 +141,9 @@ def _parse_reset_time(text: str, now: datetime) -> datetime | None:
     return reset
 
 
-def classify_limit_error(text: str, now: datetime) -> ClaudeCLIError | None:
+def classify_limit_error(
+    text: str, now: datetime
+) -> ClaudeUsageLimitError | ClaudeWeeklyLimitError | None:
     """Return a usage-limit error if text reports one, else None."""
     lowered = text.lower()
     if "limit" not in lowered or not ("reached" in lowered or "hit" in lowered):

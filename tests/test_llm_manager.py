@@ -1,5 +1,6 @@
 """Test suite for src/llm/llm_manager.py"""
 
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -9,7 +10,7 @@ from langchain_core.prompts import ChatPromptTemplate
 
 import src.llm.prompts as prompts
 from config.constants import cost_per_token
-from src.llm.claude_cli import ClaudeResult
+from src.llm.claude_cli import ClaudeResult, ClaudeUsageLimitError, ClaudeWeeklyLimitError
 from src.llm.llm_manager import (
     AIAdapter,
     ClaudeCodeModel,
@@ -1269,3 +1270,67 @@ class TestGPTAnswererIntegration:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestClaudeUsageLimits:
+    """Five-hour limit waits and retries; weekly limit stops the run"""
+
+    @patch("src.llm.llm_manager.pause")
+    def test_logger_chat_model_waits_on_usage_limit(self, mock_pause):
+        """Unknown reset time waits the 30-minute default, then retries"""
+        reply = AIMessage(content="ok")
+        mock_llm = MagicMock()
+        mock_llm.invoke.side_effect = [ClaudeUsageLimitError("limit reached", resets_at=None), reply]
+        chat_model = LoggerChatModel(mock_llm)
+        chat_model.llm_logger = MagicMock()
+
+        assert chat_model([{"role": "user", "content": "hi"}]) is reply
+        mock_pause.assert_called_once_with(1800, 1801)
+
+    @patch("src.llm.llm_manager.pause")
+    def test_logger_chat_model_waits_until_reset(self, mock_pause):
+        """A known reset time waits until then plus one minute"""
+        reply = AIMessage(content="ok")
+        resets_at = datetime.now() + timedelta(minutes=10)
+        mock_llm = MagicMock()
+        mock_llm.invoke.side_effect = [ClaudeUsageLimitError("limit reached", resets_at), reply]
+        chat_model = LoggerChatModel(mock_llm)
+        chat_model.llm_logger = MagicMock()
+
+        chat_model([{"role": "user", "content": "hi"}])
+
+        wait = mock_pause.call_args.args[0]
+        assert abs(wait - 660) < 5
+
+    def test_logger_chat_model_reraises_weekly_limit(self):
+        mock_llm = MagicMock()
+        mock_llm.invoke.side_effect = ClaudeWeeklyLimitError("weekly limit reached")
+        chat_model = LoggerChatModel(mock_llm)
+
+        with pytest.raises(ClaudeWeeklyLimitError):
+            chat_model([{"role": "user", "content": "hi"}])
+
+    @patch("src.llm.llm_manager.AIAdapter")
+    @patch("src.llm.llm_manager.LoggerChatModel")
+    def test_job_is_interesting_does_not_swallow_weekly_limit(
+        self,
+        mock_logger_chat,
+        mock_ai_adapter,
+        mock_api_key,
+        mock_llm_proxy,
+        mock_resume_structured,
+        mock_resume_readable,
+        mock_job,
+    ):
+        """job_is_interesting catches Exception; the weekly limit must still get through"""
+        mock_chain = MagicMock()
+        mock_chain.invoke.side_effect = ClaudeWeeklyLimitError("weekly limit reached")
+        answerer = GPTAnswerer(mock_api_key, mock_llm_proxy)
+        answerer.chains["job_is_interesting"] = mock_chain
+        answerer.chains["summarize_job_description"] = MagicMock(invoke=MagicMock(return_value="x"))
+        answerer.set_resume(mock_resume_structured, mock_resume_readable)
+        answerer.set_job(mock_job)
+        answerer.search_parameters = "Remote: True"
+
+        with pytest.raises(ClaudeWeeklyLimitError):
+            answerer.job_is_interesting(mock_job)
