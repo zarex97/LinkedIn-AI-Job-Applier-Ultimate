@@ -208,3 +208,22 @@ def test_claude_workdir_is_outside_repo():
     assert repo_root not in CLAUDE_WORKDIR.resolve().parents
     assert CLAUDE_WORKDIR.resolve() != repo_root
 
+
+
+def test_parse_rate_limit_status_without_known_words_raises_usage_limit():
+    """The CLI's HTTP status is a format-independent limit signal"""
+    payload = json.dumps(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": True,
+            "api_error_status": 429,
+            "result": "You're out of usage for now",
+            "num_turns": 1,
+            "session_id": "s",
+            "usage": {"input_tokens": 0, "output_tokens": 0},
+            "modelUsage": {},
+        }
+    )
+    with pytest.raises(ClaudeUsageLimitError):
+        parse_claude_output(payload, 1)

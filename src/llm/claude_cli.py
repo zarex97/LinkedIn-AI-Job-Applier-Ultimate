@@ -171,6 +171,8 @@ def parse_claude_output(stdout: str, returncode: int, stderr: str = "") -> Claud
         limit_error = classify_limit_error(f"{result_text}\n{stderr}", datetime.now())
         if limit_error:
             raise limit_error
+        if data.get("api_error_status") == 429:
+            raise ClaudeUsageLimitError(result_text.strip() or "Claude rate limit (HTTP 429)")
         raise ClaudeCLIError(
             f"claude failed ({data.get('subtype')}, exit code {returncode}): "
             f"{result_text or stderr.strip()}"

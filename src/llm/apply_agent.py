@@ -13,11 +13,13 @@ from config.constants import CUSTOM_COST_PER_TOKEN, LOG_DIR, RESUME_DIR, cost_pe
 from config.logger_config import logger
 from src.dashboard.runtime import emit_event
 from src.llm.claude_apply_agent import (
-    BROWSER_USE_DAEMON_NAME,
+    BROWSER_USE_MISSING_MESSAGE,
     GATE_SCRIPT,
     BotBrowser,
     ClaudeCodeApplyRunner,
+    browser_use_env,
     build_claude_tool_notes,
+    resolve_browser_use_cli,
     stop_browser_use_daemon,
 )
 from src.llm.claude_cli import CLAUDE_WORKDIR, ClaudeResult, ClaudeWeeklyLimitError
@@ -283,15 +285,21 @@ class ApplyAgent:
             external_sites_password=self.external_sites_password,
             tool_notes=build_claude_tool_notes(GATE_SCRIPT, gate_dir),
         )
+        browser_use_cli = resolve_browser_use_cli()
+        if browser_use_cli is None:
+            logger.error(BROWSER_USE_MISSING_MESSAGE)
+            emit_event(
+                "agent_apply_failed",
+                "External apply agent failed",
+                url=job_url,
+                error=BROWSER_USE_MISSING_MESSAGE,
+            )
+            return "Error", BROWSER_USE_MISSING_MESSAGE
         runner = ClaudeCodeApplyRunner(model=self.model, gate_dir=gate_dir)
         started_at = time.perf_counter()
         try:
             async with BotBrowser(self.storage_state, headless=HEADLESS_MODE) as browser:
-                env_overrides = {
-                    "BU_CDP_URL": browser.cdp_url,
-                    "BU_NAME": BROWSER_USE_DAEMON_NAME,
-                    "BH_TAB_MARKER": "0",
-                }
+                env_overrides = browser_use_env(browser.cdp_url, browser_use_cli, dict(os.environ))
 
                 async def save_session() -> None:
                     await browser.save_session(self.browser_storage_state)

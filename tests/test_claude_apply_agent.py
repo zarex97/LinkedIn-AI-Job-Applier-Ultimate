@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import subprocess
 import threading
 import time
@@ -16,7 +17,9 @@ from src.llm.claude_apply_agent import (
     BotBrowser,
     ClaudeCodeApplyRunner,
     build_claude_tool_notes,
+    browser_use_env,
     map_apply_result,
+    resolve_browser_use_cli,
     stop_browser_use_daemon,
 )
 from src.llm.claude_cli import CLAUDE_WORKDIR, ClaudeWeeklyLimitError
@@ -183,12 +186,14 @@ async def test_runner_retries_once_after_usage_limit(tmp_path):
             "src.llm.claude_apply_agent.asyncio.create_subprocess_exec",
             new=AsyncMock(side_effect=[limited, succeeded]),
         ),
-        patch("src.llm.claude_apply_agent.pause") as mock_pause,
+        patch("src.llm.claude_apply_agent.async_pause", new_callable=AsyncMock) as mock_pause,
+        patch("src.llm.claude_apply_agent.time.sleep") as mock_sleep,
     ):
         result = await _runner(tmp_path).run("TASK")
 
     assert result == ("Success", "")
-    mock_pause.assert_called_once()
+    mock_pause.assert_awaited_once()
+    mock_sleep.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -298,25 +303,216 @@ async def test_apply_to_job_returns_runner_verdict(tmp_path):
 
 def test_stop_browser_use_daemon_targets_named_daemon():
     with (
-        patch("src.llm.claude_apply_agent.shutil.which", return_value="C:/bin/browser-use.exe"),
+        patch(
+            "src.llm.claude_apply_agent.resolve_browser_use_cli",
+            return_value=Path("C:/bin/browser-use.exe"),
+        ),
         patch("src.llm.claude_apply_agent.subprocess.run") as mock_run,
     ):
         stop_browser_use_daemon()
-    assert mock_run.call_args.args[0] == ["C:/bin/browser-use.exe", "--reload"]
+    assert mock_run.call_args.args[0] == [str(Path("C:/bin/browser-use.exe")), "--reload"]
     assert mock_run.call_args.kwargs["env"]["BU_NAME"] == "job_applier"
 
 
 def test_stop_browser_use_daemon_ignores_missing_cli():
-    with patch("src.llm.claude_apply_agent.shutil.which", return_value=None):
+    with patch("src.llm.claude_apply_agent.resolve_browser_use_cli", return_value=None):
         stop_browser_use_daemon()
 
 
 def test_stop_browser_use_daemon_ignores_timeout():
     with (
-        patch("src.llm.claude_apply_agent.shutil.which", return_value="C:/bin/browser-use.exe"),
+        patch(
+            "src.llm.claude_apply_agent.resolve_browser_use_cli",
+            return_value=Path("C:/bin/browser-use.exe"),
+        ),
         patch(
             "src.llm.claude_apply_agent.subprocess.run",
             side_effect=subprocess.TimeoutExpired(cmd="browser-use", timeout=30),
         ),
     ):
         stop_browser_use_daemon()
+
+
+# --- Final review fixes ---------------------------------------------------------
+
+
+def _fake_cli(directory: Path) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    exe = directory / ("browser-use.exe" if os.name == "nt" else "browser-use")
+    exe.write_text("")
+    return exe
+
+
+def test_resolve_browser_use_cli_prefers_uv_tool_bin(tmp_path, monkeypatch):
+    """The venv ships an older browser-use CLI; the uv tool install (the harness) must win"""
+    monkeypatch.delenv("UV_TOOL_BIN_DIR", raising=False)
+    tool_exe = _fake_cli(tmp_path / ".local" / "bin")
+    venv_exe = _fake_cli(tmp_path / "venv" / "Scripts")
+    with (
+        patch("src.llm.claude_apply_agent.Path.home", return_value=tmp_path),
+        patch("src.llm.claude_apply_agent.shutil.which", return_value=str(venv_exe)),
+        patch(
+            "src.llm.claude_apply_agent._is_browser_harness",
+            side_effect=lambda exe: Path(exe) == tool_exe,
+        ),
+    ):
+        assert resolve_browser_use_cli() == tool_exe
+
+
+def test_resolve_browser_use_cli_rejects_venv_shim(tmp_path, monkeypatch):
+    monkeypatch.delenv("UV_TOOL_BIN_DIR", raising=False)
+    venv_exe = _fake_cli(tmp_path / "venv" / "Scripts")
+    with (
+        patch("src.llm.claude_apply_agent.Path.home", return_value=tmp_path),
+        patch("src.llm.claude_apply_agent.shutil.which", return_value=str(venv_exe)),
+        patch("src.llm.claude_apply_agent._is_browser_harness", return_value=False),
+    ):
+        assert resolve_browser_use_cli() is None
+
+
+def test_browser_use_env_puts_harness_dir_first_on_path(tmp_path):
+    cli = tmp_path / "toolbin" / "browser-use.exe"
+    env = browser_use_env("http://127.0.0.1:9555", cli, {"PATH": "C:/repo/.venv/Scripts"})
+    assert env["PATH"].split(os.pathsep)[0] == str(cli.parent)
+    assert env["BU_CDP_URL"] == "http://127.0.0.1:9555"
+    assert env["BU_NAME"] == "job_applier"
+    assert env["BH_TAB_MARKER"] == "0"
+
+
+@pytest.mark.asyncio
+@patch("src.llm.apply_agent.LLM_MODEL_TYPE", "claude_code")
+async def test_apply_fails_fast_without_browser_use_cli(tmp_path):
+    agent = ApplyAgent(None, str(tmp_path / "state.json"))
+    agent.set_resume("resume")
+    with (
+        patch("src.llm.apply_agent.resolve_browser_use_cli", return_value=None),
+        patch("src.llm.apply_agent.BotBrowser") as mock_browser,
+        patch("src.llm.apply_agent.ClaudeCodeApplyRunner") as mock_runner,
+    ):
+        result, reason = await agent.apply_to_job("https://jobs.example.com/1")
+    assert result == "Error"
+    assert "browser-use CLI" in reason
+    mock_browser.assert_not_called()
+    mock_runner.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_verification_wait_does_not_count_against_timeout(tmp_path):
+    """A slow inbox must not kill an agent that was close to finishing"""
+    gate = VerificationGate(tmp_path / "gate")
+    process = FakeProcess(_result_json(SUBMITTED), delay=2.0)
+
+    def agent_asks_for_verification():
+        time.sleep(0.1)
+        gate.request()
+
+    def slow_user(*_args):
+        time.sleep(1.0)
+        return ""
+
+    threading.Thread(target=agent_asks_for_verification, daemon=True).start()
+    with (
+        patch(
+            "src.llm.claude_apply_agent.asyncio.create_subprocess_exec",
+            new=AsyncMock(return_value=process),
+        ),
+        patch("builtins.input", side_effect=slow_user),
+    ):
+        result = await _runner(tmp_path, timeout_seconds=1.5).run("TASK", poll_seconds=0.05)
+
+    assert result == ("Success", "")
+    process.kill.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_runner_kills_agent_when_no_console_for_verification(tmp_path):
+    """Dashboard runs have no stdin: input() raises EOFError; the agent must not be orphaned"""
+    gate = VerificationGate(tmp_path / "gate")
+    process = FakeProcess(hang=True)
+
+    def agent_asks_for_verification():
+        time.sleep(0.1)
+        gate.request()
+
+    threading.Thread(target=agent_asks_for_verification, daemon=True).start()
+    with (
+        patch(
+            "src.llm.claude_apply_agent.asyncio.create_subprocess_exec",
+            new=AsyncMock(return_value=process),
+        ),
+        patch("builtins.input", side_effect=EOFError),
+    ):
+        result, reason = await _runner(tmp_path).run("TASK", poll_seconds=0.05)
+
+    process.kill.assert_called_once()
+    assert result == "Error"
+    assert "email verification" in reason.lower()
+
+
+@pytest.mark.asyncio
+async def test_runner_kills_agent_on_unexpected_error(tmp_path):
+    gate = VerificationGate(tmp_path / "gate")
+    process = FakeProcess(hang=True)
+
+    def agent_asks_for_verification():
+        time.sleep(0.1)
+        gate.request()
+
+    threading.Thread(target=agent_asks_for_verification, daemon=True).start()
+    with (
+        patch(
+            "src.llm.claude_apply_agent.asyncio.create_subprocess_exec",
+            new=AsyncMock(return_value=process),
+        ),
+        patch("builtins.input", return_value=""),
+    ):
+        with pytest.raises(RuntimeError, match="disk full"):
+            await _runner(tmp_path).run(
+                "TASK",
+                on_verified=AsyncMock(side_effect=RuntimeError("disk full")),
+                poll_seconds=0.05,
+            )
+
+    process.kill.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_bot_browser_removes_profile_dir(tmp_path):
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    context = AsyncMock()
+    playwright = MagicMock()
+    playwright.chromium.launch_persistent_context = AsyncMock(return_value=context)
+    playwright.stop = AsyncMock()
+    manager = MagicMock()
+    manager.start = AsyncMock(return_value=playwright)
+
+    with (
+        patch("src.llm.claude_apply_agent.async_playwright", return_value=manager),
+        patch("src.llm.claude_apply_agent.tempfile.mkdtemp", return_value=str(profile)),
+    ):
+        async with BotBrowser(None, headless=True, port=9557):
+            assert profile.exists()
+
+    assert not profile.exists()
+
+
+@pytest.mark.asyncio
+async def test_bot_browser_cleans_up_when_start_fails(tmp_path):
+    state = tmp_path / "state.json"
+    state.write_text(json.dumps({"cookies": [{"name": "bad"}], "origins": []}))
+    context = AsyncMock()
+    context.add_cookies.side_effect = ValueError("bad cookie")
+    playwright = MagicMock()
+    playwright.chromium.launch_persistent_context = AsyncMock(return_value=context)
+    playwright.stop = AsyncMock()
+    manager = MagicMock()
+    manager.start = AsyncMock(return_value=playwright)
+
+    with patch("src.llm.claude_apply_agent.async_playwright", return_value=manager):
+        with pytest.raises(ValueError):
+            async with BotBrowser(str(state), headless=True, port=9558):
+                pass
+
+    context.close.assert_awaited_once()
+    playwright.stop.assert_awaited_once()

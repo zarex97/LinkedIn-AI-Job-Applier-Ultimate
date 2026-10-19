@@ -34,7 +34,7 @@ from src.llm.claude_cli import (
     parse_claude_output,
 )
 from src.llm.verification_gate import VerificationGate
-from src.utils.utils import pause
+from src.utils.utils import async_pause
 
 APPLY_RESULT_SCHEMA = {
     "type": "object",
@@ -80,14 +80,61 @@ def build_claude_tool_notes(gate_script: Path, gate_dir: Path) -> str:
     )
 
 
+BROWSER_USE_MISSING_MESSAGE = (
+    "browser-use CLI not found. Install it apart from the project with "
+    "`uv tool install browser-use --python 3.12`."
+)
+_BROWSER_USE_EXE = "browser-use.exe" if os.name == "nt" else "browser-use"
+
+
+def _is_browser_harness(executable: Path) -> bool:
+    """True for the browser-use CLI this agent targets (browser_harness), not the venv's older one"""
+    try:
+        completed = subprocess.run(
+            [str(executable), "--help"], capture_output=True, timeout=60
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    return b"--doctor" in completed.stdout
+
+
+def resolve_browser_use_cli() -> Path | None:
+    """
+    Find the uv-tool browser-use CLI. The project venv pins browser-use 0.12.6, whose own
+    `browser-use` command comes first on PATH under `uv run` and ignores BU_CDP_URL.
+    """
+    candidates = []
+    if os.environ.get("UV_TOOL_BIN_DIR"):
+        candidates.append(Path(os.environ["UV_TOOL_BIN_DIR"]) / _BROWSER_USE_EXE)
+    candidates.append(Path.home() / ".local" / "bin" / _BROWSER_USE_EXE)
+    on_path = shutil.which("browser-use")
+    if on_path:
+        candidates.append(Path(on_path))
+    for candidate in candidates:
+        if candidate.is_file() and _is_browser_harness(candidate):
+            return candidate
+    return None
+
+
+def browser_use_env(cdp_url: str, cli: Path, base_env: dict[str, str]) -> dict[str, str]:
+    """Env for the agent: the harness CLI first on PATH, pointed at the bot's browser"""
+    path = os.pathsep.join(filter(None, [str(cli.parent), base_env.get("PATH", "")]))
+    return {
+        "PATH": path,
+        "BU_CDP_URL": cdp_url,
+        "BU_NAME": BROWSER_USE_DAEMON_NAME,
+        "BH_TAB_MARKER": "0",
+    }
+
+
 def stop_browser_use_daemon() -> None:
     """Stop the bot's named browser-use daemon; it outlives each CLI call"""
-    executable = shutil.which("browser-use")
+    executable = resolve_browser_use_cli()
     if executable is None:
         return
     try:
         subprocess.run(
-            [executable, "--reload"],
+            [str(executable), "--reload"],
             env={**os.environ, "BU_NAME": BROWSER_USE_DAEMON_NAME},
             capture_output=True,
             timeout=30,
@@ -111,22 +158,28 @@ class BotBrowser:
         self.port = port or _free_port()
         self._playwright = None
         self._context = None
+        self._profile_dir: str | None = None
 
     @property
     def cdp_url(self) -> str:
         return f"http://127.0.0.1:{self.port}"
 
     async def __aenter__(self) -> "BotBrowser":
-        self._playwright = await async_playwright().start()
-        self._context = await self._playwright.chromium.launch_persistent_context(
-            tempfile.mkdtemp(prefix="job_applier_browser_"),
-            headless=self.headless,
-            args=[f"--remote-debugging-port={self.port}"],
-        )
-        if self.storage_state and Path(self.storage_state).exists():
-            state = json.loads(Path(self.storage_state).read_text(encoding="utf-8"))
-            if state.get("cookies"):
-                await self._context.add_cookies(state["cookies"])
+        try:
+            self._playwright = await async_playwright().start()
+            self._profile_dir = tempfile.mkdtemp(prefix="job_applier_browser_")
+            self._context = await self._playwright.chromium.launch_persistent_context(
+                self._profile_dir,
+                headless=self.headless,
+                args=[f"--remote-debugging-port={self.port}"],
+            )
+            if self.storage_state and Path(self.storage_state).exists():
+                state = json.loads(Path(self.storage_state).read_text(encoding="utf-8"))
+                if state.get("cookies"):
+                    await self._context.add_cookies(state["cookies"])
+        except BaseException:
+            await self.__aexit__(None, None, None)
+            raise
         return self
 
     async def save_session(self, path: str) -> None:
@@ -138,8 +191,12 @@ class BotBrowser:
             if self._context is not None:
                 await self._context.close()
         finally:
-            if self._playwright is not None:
-                await self._playwright.stop()
+            try:
+                if self._playwright is not None:
+                    await self._playwright.stop()
+            finally:
+                if self._profile_dir is not None:
+                    shutil.rmtree(self._profile_dir, ignore_errors=True)
 
 
 class ClaudeCodeApplyRunner:
@@ -168,16 +225,29 @@ class ClaudeCodeApplyRunner:
             max_turns=self.max_turns,
         )
 
-    async def _relay_verification(self, on_verified: Callable[[], Awaitable[None]] | None) -> None:
+    async def _relay_verification(
+        self,
+        on_verified: Callable[[], Awaitable[None]] | None,
+        communicate: asyncio.Future,
+    ) -> bool:
+        """Ask the user in the console; False when there is no console to ask"""
         print("\n" + "=" * 60)
         print("EMAIL VERIFICATION REQUIRED")
         print("Please check your email and confirm your account.")
         print("Once done, press Enter to continue...")
         print("=" * 60 + "\n")
-        await asyncio.get_running_loop().run_in_executor(None, input)
+        try:
+            await asyncio.get_running_loop().run_in_executor(None, input)
+        except EOFError:
+            logger.error("Email verification needed, but the bot has no console to ask the user")
+            return False
+        if communicate.done():
+            # the agent gave up waiting while the user was away; nothing left to confirm
+            return True
         if on_verified is not None:
             await on_verified()
         self.gate.confirm()
+        return True
 
     async def _run_once(
         self,
@@ -198,19 +268,24 @@ class ClaudeCodeApplyRunner:
         )
         communicate = asyncio.ensure_future(process.communicate(task.encode("utf-8")))
         deadline = time.monotonic() + self.timeout_seconds
-        while not communicate.done():
-            await asyncio.wait({communicate}, timeout=poll_seconds)
-            if communicate.done():
-                break
-            if self.gate.pending():
-                await self._relay_verification(on_verified)
-                # time spent waiting for the user does not count against the agent
-                deadline = max(deadline, time.monotonic() + poll_seconds)
-            if time.monotonic() > deadline:
+        try:
+            while not communicate.done():
+                await asyncio.wait({communicate}, timeout=poll_seconds)
+                if communicate.done():
+                    break
+                if self.gate.pending():
+                    paused_at = time.monotonic()
+                    if not await self._relay_verification(on_verified, communicate):
+                        return "Error", "Email verification needed, but no console to ask the user"
+                    # time spent waiting for the user does not count against the agent
+                    deadline += time.monotonic() - paused_at
+                if time.monotonic() > deadline:
+                    return "Error", f"Agent timed out after {self.timeout_seconds} s"
+            stdout, stderr = communicate.result()
+        finally:
+            if not communicate.done():
                 process.kill()
                 await communicate
-                return "Error", f"Agent timed out after {self.timeout_seconds} s"
-        stdout, stderr = communicate.result()
         return parse_claude_output(
             stdout.decode("utf-8", errors="replace"),
             process.returncode,
@@ -240,7 +315,7 @@ class ClaudeCodeApplyRunner:
                 logger.warning(
                     f"Claude usage limit reached ({e}). Waiting {wait_time:.0f} seconds, then retrying the job..."
                 )
-                pause(wait_time, wait_time + 1)
+                await async_pause(wait_time, wait_time + 1)
                 continue
             except ClaudeCLIError as e:
                 logger.error(f"Claude apply agent failed: {e}")
