@@ -1,16 +1,26 @@
 import asyncio
 import os
+import time
 from datetime import datetime
 from pathlib import Path
 
 from browser_use import Agent, Browser, ChatAnthropic, ChatGoogle, ChatOllama, ChatOpenAI, Tools
 from browser_use.tools.views import UploadFileAction
 
+import src.llm.prompts as prompts
 from config.app_config import APPLY_AGENT_MODEL, HEADLESS_MODE, LLM_MODEL_TYPE
 from config.constants import CUSTOM_COST_PER_TOKEN, LOG_DIR, RESUME_DIR, cost_per_token
-import src.llm.prompts as prompts
 from config.logger_config import logger
 from src.dashboard.runtime import emit_event
+from src.llm.claude_apply_agent import (
+    BROWSER_USE_DAEMON_NAME,
+    GATE_SCRIPT,
+    BotBrowser,
+    ClaudeCodeApplyRunner,
+    build_claude_tool_notes,
+    stop_browser_use_daemon,
+)
+from src.llm.claude_cli import CLAUDE_WORKDIR, ClaudeResult, ClaudeWeeklyLimitError
 from src.pydantic_models.log_models import LLMCall
 from src.utils.utils import append_yaml_file, get_ready_made_resume
 
@@ -148,10 +158,13 @@ class ApplyAgent:
         """Add resume for analysis."""
         self.resume_readable = resume_readable
 
-    async def apply(self, job_url: str) -> None:
+    async def apply(self, job_url: str) -> tuple[str, str] | None:
         """Apply to the job using AI Agent"""
         resume_pdf_path = str(get_ready_made_resume())
         emit_event("agent_apply_started", "External apply agent started", url=job_url)
+
+        if self.model_type == "claude_code":
+            return await self._apply_with_claude_code(job_url, resume_pdf_path)
 
         tools = Tools()
 
@@ -259,12 +272,67 @@ class ApplyAgent:
 
         return total_cost
 
+    async def _apply_with_claude_code(self, job_url: str, resume_pdf_path: str) -> tuple[str, str]:
+        """Apply with Claude Code driving the bot's own browser through the browser-use CLI"""
+        gate_dir = CLAUDE_WORKDIR / "verification_gate"
+        task = build_apply_task(
+            job_url=job_url,
+            resume_readable=self.resume_readable,
+            resume_pdf_path=resume_pdf_path,
+            user_email=self.user_email,
+            external_sites_password=self.external_sites_password,
+            tool_notes=build_claude_tool_notes(GATE_SCRIPT, gate_dir),
+        )
+        runner = ClaudeCodeApplyRunner(model=self.model, gate_dir=gate_dir)
+        started_at = time.perf_counter()
+        try:
+            async with BotBrowser(self.storage_state, headless=HEADLESS_MODE) as browser:
+                env_overrides = {
+                    "BU_CDP_URL": browser.cdp_url,
+                    "BU_NAME": BROWSER_USE_DAEMON_NAME,
+                    "BH_TAB_MARKER": "0",
+                }
+
+                async def save_session() -> None:
+                    await browser.save_session(self.browser_storage_state)
+
+                result = await runner.run(task, env_overrides=env_overrides, on_verified=save_session)
+        finally:
+            stop_browser_use_daemon()
+
+        if runner.last_result is not None:
+            self._log_claude_code_usage(task, runner.last_result, time.perf_counter() - started_at)
+        result_name, reason = result
+        if result_name == "Error":
+            emit_event("agent_apply_failed", "External apply agent failed", url=job_url, error=reason)
+        else:
+            emit_event("agent_apply_completed", "External apply agent completed", url=job_url)
+        return result
+
+    def _log_claude_code_usage(self, task: str, result: ClaudeResult, seconds: float) -> None:
+        """Log a Claude Code agent run; subscription use has no per-token cost"""
+        log_entry = LLMCall(
+            model_name=result.model or self.model,
+            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            prompts={"prompt_1": self.loggable_task(task), "prompt_2": "<Some browser content>"},
+            parsed_reply=f"<Agent verdict after {result.num_turns} turns>",
+            total_tokens=result.input_tokens + result.output_tokens,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            response_time_seconds=round(seconds, 1),
+            total_cost=0.0,
+        )
+        append_yaml_file(Path(self.calls_log), log_entry.model_dump())
+
     async def apply_to_job(self, job_url: str) -> tuple[str, str]:
         """Apply to job, handling event loop properly"""
         # Directly await the apply method since we're already in an async context
         try:
-            await self.apply(job_url)
-            return ("Success", "")
+            result = await self.apply(job_url)
+            # the browser_use library path reports no verdict; a finished run counts as Success
+            return result if result is not None else ("Success", "")
+        except ClaudeWeeklyLimitError:
+            raise
         except Exception as e:
             logger.error(f"Error applying to job: {e}")
             emit_event(

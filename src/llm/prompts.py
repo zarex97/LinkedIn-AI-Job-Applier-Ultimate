@@ -793,3 +793,24 @@ apply_agent_account_unavailable = (
 # Tool notes for the browser_use library agent (API-key providers)
 apply_agent_browser_use_tool_notes = """- Uploading the resume: prefer the built-in upload_file_to_element action; if the page flow needs it, you can use the upload_resume tool to produce an UploadFileAction.
 - If an email verification or confirmation step appears, call the wait_for_email_verification tool immediately — do NOT give up or mark the task as failed. After the tool returns, continue the application."""
+
+# Extra tool notes for the Claude Code apply agent (LLM_MODEL_TYPE = "claude_code").
+# The browser-use CLI guide from src/llm/browser_use_cli_guide.md comes first.
+claude_apply_agent_tool_notes = """{browser_guide}
+
+# Email verification
+
+If a site asks for email verification or confirmation, do not give up. Run this
+exact command with the Bash tool and wait for it to finish:
+
+{gate_command}
+
+It returns once I have confirmed my email. Then reload the page if needed and
+continue the application.
+
+# Final verdict
+
+Set `submitted` to true only if the site confirmed the application was sent.
+Otherwise set it to false and give the reason in `reason`, starting with what
+blocked you. Put the full summary in `summary` and every question you met in
+`questions`."""
