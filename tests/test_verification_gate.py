@@ -81,3 +81,20 @@ def test_script_wait_times_out(tmp_path):
     )
     assert completed.returncode == 1
     assert "Timed out waiting for the user." in completed.stdout
+
+
+def test_confirm_removes_request_before_marking_done(tmp_path, monkeypatch):
+    """A waiter that sees `done` must never still see the request as pending"""
+    gate = VerificationGate(tmp_path)
+    gate.request()
+    request_seen_when_done_written = []
+    original_write_text = Path.write_text
+
+    def recording_write_text(self, *args, **kwargs):
+        if self.name == "done":
+            request_seen_when_done_written.append((tmp_path / "request").exists())
+        return original_write_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", recording_write_text)
+    gate.confirm()
+    assert request_seen_when_done_written == [False]

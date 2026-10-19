@@ -31,9 +31,10 @@ class VerificationGate:
 
     def confirm(self) -> None:
         """Mark the request as handled by the user"""
+        # remove the request first: whoever sees `done` must not still see it pending
         self.gate_dir.mkdir(parents=True, exist_ok=True)
-        self._done_file.write_text("done", encoding="utf-8")
         self._request_file.unlink(missing_ok=True)
+        self._done_file.write_text("done", encoding="utf-8")
 
     def wait_for_confirmation(self, poll_seconds: float = 1.0, timeout: float = 1800) -> bool:
         """Block until the user confirms; False on timeout"""
