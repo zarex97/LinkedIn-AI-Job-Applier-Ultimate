@@ -356,13 +356,12 @@ class SearchCustomizer(BaseSearchCustomizer):
     async def _apply_filters(self):
         """Apply set filters (async)"""
         try:
-            # Find and click the "Show results" or "Apply" button
+            # Only target the modal's "Show results" button: a broader "Apply" match
+            # hits the "Easy Apply" filter pill and limits the search to Easy Apply jobs
             apply_selectors = [
-                "//button[contains(., 'Show') or contains(., 'Apply') or contains(., 'Done')]",
-                "button[aria-label*='Show results']",
-                "button[aria-label*='Apply filters']",
-                ".jobs-search-dropdown__apply-button",
-                ".search-reusables__filter-pill-button",
+                "button[aria-label*='to show results']",
+                "//button[normalize-space(.)='Show results']",
+                ".search-reusables__secondary-filters-show-results-button",
             ]
 
             for selector in apply_selectors:
@@ -370,6 +369,11 @@ class SearchCustomizer(BaseSearchCustomizer):
                     # await async_pause()
                     logger.info("Filters applied")
                     return True
+
+            # LinkedIn may apply the filters as soon as they are picked and close the modal
+            if re.search(r"[?&]f_[A-Z]+=", self.page.url or ""):
+                logger.info(f"Filters already applied by LinkedIn: {self.page.url}")
+                return True
 
             logger.warning("Could not find or click filter apply button")
             return False

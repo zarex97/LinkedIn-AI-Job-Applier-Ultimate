@@ -419,6 +419,26 @@ class TestApplyFilters:
             result = await customizer._apply_filters()
         assert result is False
 
+    @pytest.mark.asyncio
+    async def test_only_targets_show_results_button(self, customizer):
+        # A broad "contains Apply" match clicked LinkedIn's "Easy Apply" filter pill,
+        # which silently limited every search to Easy Apply jobs.
+        mock_click = AsyncMock(return_value=False)
+        customizer.page.url = "https://www.linkedin.com/jobs/search/?keywords=x"
+        with patch(f"{MODULE}.safe_click", mock_click):
+            await customizer._apply_filters()
+        selectors = [call.args[1] for call in mock_click.call_args_list]
+        assert selectors
+        for selector in selectors:
+            assert "show results" in selector.lower().replace("-", " "), selector
+
+    @pytest.mark.asyncio
+    async def test_true_when_linkedin_already_applied_filters(self, customizer):
+        customizer.page.url = "https://www.linkedin.com/jobs/search/?f_E=4&f_TPR=r2592000"
+        with patch(f"{MODULE}.safe_click", new_callable=AsyncMock, return_value=False):
+            result = await customizer._apply_filters()
+        assert result is True
+
 
 # ---------------------------------------------------------------------------
 # _set_easy_apply_filter
